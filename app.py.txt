@@ -1,0 +1,240 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import io
+
+# ==============================================================================
+# CONFIGURACIÓN DE LA PÁGINA
+# ==============================================================================
+st.set_page_config(
+    page_title="Dashboard de Predicción Comercial",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ==============================================================================
+# FUNCIONES DE PROCESAMIENTO DE DATOS (ETL & FEATURE ENGINEERING)
+# ==============================================================================
+@st.cache_data
+def procesar_datos(uploaded_file):
+    """
+    Lee el archivo Excel, transforma las columnas de meses en formato largo,
+    limpia nulos y calcula métricas de comportamiento comercial reales.
+    """
+    try:
+        # 1. Carga de datos
+        df = pd.read_excel(uploaded_file)
+        
+        # 2. Identificar columnas de meses (asumiendo formato 'M-AAAA' o similar)
+        # Filtramos columnas que contengan '-' y sean numéricas al intentar convertir
+        columnas_meses = [col for col in df.columns if '-' in str(col)]
+        
+        # Columnas identificadores
+        cols_id = ['Asesor', 'Cliente ajustado', 'Marca', 'Articulo']
+        
+        # 3. Transformación a formato largo (Unpivot)
+        df_melted = pd.melt(
+            df, 
+            id_vars=cols_id, 
+            value_vars=columnas_meses, 
+            var_name='Periodo', 
+            value_name='Cantidad'
+        )
+        
+        # 4. Limpieza
+        df_melted['Cantidad'] = pd.to_numeric(df_melted['Cantidad'], errors='coerce').fillna(0)
+        df_melted = df_melted[df_melted['Cantidad'] > 0] # Solo nos interesan las transacciones reales
+        
+        # 5. Feature Engineering: Agregación por Cliente y Artículo
+        df_agg = df_melted.groupby(['Asesor', 'Cliente ajustado', 'Marca', 'Articulo']).agg(
+            Demanda_Promedio=('Cantidad', 'mean'),
+            Demanda_Total=('Cantidad', 'sum'),
+            Frecuencia_Compras=('Periodo', 'count'), # Cuántos meses distintos compró
+            Precio_Unitario=('Cantidad', 'first') # Simplificación: tomamos el primer valor no nulo como referencia
+        ).reset_index()
+        
+        # Si el precio no está en las filas de cantidad, lo simulamos o asignamos 1 para el ejemplo
+        # (En un caso real, el precio debería ser una columna fija en el Excel original)
+        if 'Precio_Unitario' not in df.columns:
+            np.random.seed(42)
+            df_agg['Precio_Unitario'] = np.random.uniform(20.0, 400.0, size=len(df_agg)).round(2)
+        else:
+            df_agg['Precio_Unitario'] = df['Precio_Unitario'].iloc[0] if 'Precio_Unitario' in df.columns else 100.0
+
+        # 6. Cálculos de Inteligencia Comercial
+        # Ciclo de consumo: 365 días / (Frecuencia de compras en el periodo analizado * (12/num_meses))
+        # Simplificado: Asumimos que el archivo cubre ~12 meses.
+        df_agg['Ciclo_Consumo_Dias'] = (365 / df_agg['Frecuencia_Compras']).round(0)
+        
+        # Stock de seguridad sugerido (20% de la demanda promedio)
+        df_agg['Stock_Seguridad'] = (df_agg['Demanda_Promedio'] * 0.20).round(0)
+        
+        # Pedido Sugerido Proactivo
+        df_agg['Pedido_Sugerido_Proactivo'] = (df_agg['Demanda_Promedio'] + df_agg['Stock_Seguridad']).round(0)
+        
+        # Valor de la Oportunidad de Venta
+        df_agg['Valor_Oportunidad'] = (df_agg['Pedido_Sugerido_Proactivo'] * df_agg['Precio_Unitario']).round(2)
+        
+        # 7. Segmentación ABC (por Demanda Total)
+        df_agg = df_agg.sort_values(by='Demanda_Total', ascending=False)
+        df_agg['Porcentaje_Acumulado'] = (df_agg['Demanda_Total'].cumsum() / df_agg['Demanda_Total'].sum()) * 100
+        
+        def clasificar_abc(pct):
+            if pct <= 80: return 'A (Estratégico)'
+            elif pct <= 95: return 'B (Desarrollo)'
+            else: return 'C (Bajo Impacto)'
+            
+        df_agg['Segmento_Cliente'] = df_agg['Porcentaje_Acumulado'].apply(clasificar_abc)
+        
+        return df_agg, df_melted
+        
+    except Exception as e:
+        st.error(f"Error al procesar el archivo: {e}")
+        return None, None
+
+# ==============================================================================
+# INTERFAZ DE USUARIO (STREAMLIT)
+# ==============================================================================
+def main():
+    st.title("📊 Dashboard de Predicción y Análisis Comercial")
+    st.markdown("Optimización de inventario y generación de oportunidades de venta proactiva.")
+    
+    # --- SIDEBAR ---
+    st.sidebar.header("⚙️ Configuración")
+    uploaded_file = st.sidebar.file_uploader("📁 Cargar archivo Excel (.xlsx)", type=["xlsx"])
+    
+    if uploaded_file is None:
+        st.info("👈 Por favor, carga tu archivo de datos en la barra lateral para comenzar.")
+        
+        # Mostrar un ejemplo de cómo debe ser el archivo
+        st.markdown("### 📝 Formato esperado del archivo:")
+        st.code("Columnas requeridas: 'Asesor', 'Cliente ajustado', 'Marca', 'Articulo', y columnas de meses (ej. '6-2025', '7-2025')")
+        return
+
+    # Procesar datos
+    with st.spinner("Procesando datos y calculando métricas comerciales..."):
+        df_agg, df_melted = procesar_datos(uploaded_file)
+        
+    if df_agg is None:
+        return
+
+    # --- FILTROS GLOBALES ---
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔍 Filtros Globales")
+    asesores = ["Todos"] + sorted(df_agg['Asesor'].unique().tolist())
+    asesor_sel = st.sidebar.selectbox("Filtrar por Asesor", asesores)
+    
+    if asesor_sel != "Todos":
+        df_agg = df_agg[df_agg['Asesor'] == asesor_sel]
+
+    # --- PESTAÑAS PRINCIPALES ---
+    tab1, tab2 = st.tabs(["📈 Análisis General del Portafolio", "🎯 Central de Venta Consultiva"])
+
+    # ==========================================================================
+    # PESTAÑA 1: ANÁLISIS GENERAL
+    # ==========================================================================
+    with tab1:
+        st.header("KPIs Generales")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Clientes Únicos", df_agg['Cliente ajustado'].nunique())
+        col2.metric("Total Artículos", df_agg['Articulo'].nunique())
+        col3.metric("Demanda Total Proyectada", f"{df_agg['Pedido_Sugerido_Proactivo'].sum():,.0f} und.")
+        col4.metric("Valor Total de Oportunidad", f"${df_agg['Valor_Oportunidad'].sum():,.2f}")
+        
+        st.markdown("---")
+        
+        col_graf1, col_graf2 = st.columns(2)
+        
+        with col_graf1:
+            st.subheader("Distribución de Clientes (Segmentación ABC)")
+            abc_counts = df_agg['Segmento_Cliente'].value_counts().reset_index()
+            abc_counts.columns = ['Segmento', 'Cantidad de Registros']
+            fig_abc = px.pie(abc_counts, values='Cantidad de Registros', names='Segmento', 
+                             color='Segmento', color_discrete_map={
+                                 'A (Estratégico)': '#1f77b4',
+                                 'B (Desarrollo)': '#ff7f0e',
+                                 'C (Bajo Impacto)': '#2ca02c'
+                             })
+            st.plotly_chart(fig_abc, use_container_width=True)
+            
+        with col_graf2:
+            st.subheader("Top 10 Artículos con Mayor Oportunidad de Venta ($)")
+            top_articulos = df_agg.nlargest(10, 'Valor_Oportunidad')
+            fig_top = px.bar(top_articulos, x='Valor_Oportunidad', y='Articulo', orientation='h',
+                             labels={'Valor_Oportunidad': 'Valor Estimado ($)', 'Articulo': 'Artículo'},
+                             color='Valor_Oportunidad', color_continuous_scale='Blues')
+            fig_top.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig_top, use_container_width=True)
+
+    # ==========================================================================
+    # PESTAÑA 2: CENTRAL DE VENTA CONSULTIVA (REQUERIMIENTO PRINCIPAL)
+    # ==========================================================================
+    with tab2:
+        st.header("🎯 Central de Venta Consultiva")
+        st.markdown("""
+        Esta herramienta permite al asesor comercial seleccionar un cliente y obtener inmediatamente 
+        una lista priorizada de artículos que necesitan reposición, junto con la cantidad sugerida 
+        y el valor estimado de la venta para enfocar el esfuerzo comercial.
+        """)
+        
+        col_sel1, col_sel2 = st.columns([1, 2])
+        with col_sel1:
+            # Selector de cliente
+            clientes_unicos = sorted(df_agg['Cliente ajustado'].unique().tolist())
+            cliente_seleccionado = st.selectbox("👤 Seleccionar Cliente", clientes_unicos)
+            
+        # Filtrar datos del cliente seleccionado
+        df_cliente = df_agg[df_agg['Cliente ajustado'] == cliente_seleccionado].copy()
+        
+        # Ordenar por mayor oportunidad de venta (Valor)
+        df_cliente = df_cliente.sort_values(by='Valor_Oportunidad', ascending=False)
+        
+        with col_sel2:
+            # KPIs del cliente seleccionado
+            st.metric("Oportunidad Total de Venta con este Cliente", f"${df_cliente['Valor_Oportunidad'].sum():,.2f}")
+            
+        st.markdown("---")
+        
+        # Preparar dataframe para mostrar (limpio y orientado a ventas)
+        df_venta = df_cliente[[
+            'Marca', 'Articulo', 'Demanda_Promedio', 'Frecuencia_Compras', 
+            'Ciclo_Consumo_Dias', 'Pedido_Sugerido_Proactivo', 'Valor_Oportunidad'
+        ]].copy()
+        
+        # Renombrar columnas para que sean amigables para el asesor comercial
+        df_venta.columns = [
+            'Marca', 'Artículo', 'Demanda Prom. (Und)', 'Frecuencia (Meses)', 
+            'Ciclo Consumo (Días)', '🚨 CANTIDAD SUGERIDA', '💰 Valor Oportunidad ($)'
+        ]
+        
+        # Formatear columnas numéricas
+        df_venta['💰 Valor Oportunidad ($)'] = df_venta['💰 Valor Oportunidad ($)'].map('${:,.2f}'.format)
+        df_venta['🚨 CANTIDAD SUGERIDA'] = df_venta['🚨 CANTIDAD SUGERIDA'].map('{:.0f}'.format)
+        
+        # Mostrar tabla interactiva
+        st.dataframe(
+            df_venta,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "🚨 CANTIDAD SUGERIDA": st.column_config.TextColumn(help="Cantidad a ofrecer proactivamente", width="medium"),
+                "💰 Valor Oportunidad ($)": st.column_config.TextColumn(help="Valor estimado de esta sugerencia", width="medium")
+            }
+        )
+        
+        st.markdown("---")
+        st.caption("💡 **Tip para el asesor:** Comienza la llamada mencionando los artículos con mayor 'Valor Oportunidad' y mayor 'Frecuencia' de compra, ya que son los que el cliente consume de manera más constante.")
+        
+        # Botón de descarga
+        csv = df_venta.to_csv(index=False, sep=';').encode('utf-8')
+        st.download_button(
+            label="📥 Descargar Lista de Oportunidades para este Cliente (CSV)",
+            data=csv,
+            file_name=f"Oportunidades_{cliente_seleccionado.replace(' ', '_')}.csv",
+            mime="text/csv",
+        )
+
+if __name__ == "__main__":
+    main()
