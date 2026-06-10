@@ -7,7 +7,7 @@
 ## 🚀 Acceso Directo a la Aplicación
 Haz clic en el siguiente botón para abrir la herramienta interactiva en tiempo real:
 
-[![Desplegar en Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)]([TU_ENLACE_DE_STREAMLIT_AQUÍ](https://modelo-de-predicci-n-y-an-lisis-de-comportamiento-comercial-av.streamlit.app/)
+[![Desplegar en Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)]((https://modelo-de-predicci-n-y-an-lisis-de-comportamiento-comercial-av.streamlit.app/)
 
 *(https://modelo-de-predicci-n-y-an-lisis-de-comportamiento-comercial-av.streamlit.app/)*
 
